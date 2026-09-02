@@ -34,8 +34,10 @@ Backend на NestJS для веб-приложения с двумя незав�
 .
 ├── Dockerfile                      # multi-stage сборка (builder + production)
 ├── docker-compose.yml              # app + postgres + redis — локальная разработка, одна команда
-├── docker-compose.prod.yml         # то же + Caddy (HTTPS) — production с реальным доменом
-├── Caddyfile                       # конфиг reverse-proxy для docker-compose.prod.yml
+├── docker-compose.prod.yml         # то же + nginx (HTTPS) — production на vancodex.tech
+├── nginx/
+│   └── user_conf.d/
+│       └── vancodex.tech.conf      # конфиг nginx для docker-compose.prod.yml (домен вшит)
 ├── docker/
 │   └── entrypoint.sh               # prisma migrate deploy перед стартом контейнера
 ├── .env.example                    # шаблон переменных окружения
@@ -209,51 +211,51 @@ npm run prisma:migrate:deploy
 npm run start:dev
 ```
 
-### 3.5. Production-развёртывание с доменом (Caddy)
+### 3.5. Production-развёртывание на vancodex.tech (nginx + автоматический HTTPS)
 
-`docker-compose.yml` рассчитан на локальную разработку — приложение слушает обычный HTTP на порту 3000. Для продакшена в репозитории есть отдельный, самостоятельный файл **`docker-compose.prod.yml`**: то же самое (`postgres` + `redis` + `app`), плюс сервис `caddy` — reverse-proxy, который сам получает и продлевает HTTPS-сертификат (Let's Encrypt) для вашего домена. Это единственный компонент из ТЗ, который нельзя было полностью подготовить заранее, не зная ваш домен, — но настраивается он тремя строчками конфига (`Caddyfile` в корне репозитория уже готов).
+`docker-compose.yml` рассчитан на локальную разработку — приложение слушает обычный HTTP на порту 3000. Для продакшена в репозитории есть отдельный, самостоятельный файл **`docker-compose.prod.yml`**: то же самое (`postgres` + `redis` + `app`), плюс сервис `nginx` — образ [`jonasal/nginx-certbot`](https://github.com/JonasAlfredsson/docker-nginx-certbot), который сам получает и продлевает HTTPS-сертификат Let's Encrypt. Домен `vancodex.tech` уже прописан напрямую в конфиге — `nginx/user_conf.d/vancodex.tech.conf` (nginx-образ сам находит там `server_name` и запрашивает сертификат именно под него, никаких дополнительных переменных для этого не нужно). Поднимается **одной командой**, руками certbot нигде не вызывается.
 
-Почему это отдельный файл, а не тот же `docker-compose.yml`: продакшен-версия занимает порты 80/443 (нужны Let's Encrypt и самому HTTPS) и не публикует порт приложения (3000) и порты БД/Redis наружу вообще — только Caddy доступен из интернета. Смешивать это с локальной разработкой избыточно.
+Почему это отдельный файл, а не тот же `docker-compose.yml`: продакшен-версия занимает порты 80/443 (нужны Let's Encrypt и самому HTTPS) и не публикует порт приложения (3000) и порты БД/Redis наружу вообще — только nginx доступен из интернета. Смешивать это с локальной разработкой избыточно.
 
-**Перед первым запуском:**
+**Перед первым запуском (вне Docker, один раз):**
 
-1. **DNS.** A-запись вашего домена (или поддомена, например `api.example.com`) должна уже указывать на IP этого сервера. Проверить: `dig +short your-domain.com` — должен вернуться IP сервера.
-2. **Firewall / security group.** На сервере должны быть открыты порты **80** и **443** для входящих подключений из интернета (80 нужен Caddy для ACME HTTP-01 challenge при получении сертификата, 443 — сам HTTPS). Порты 5432/6379/3000 наоборот — наружу открывать не нужно, `docker-compose.prod.yml` их и не публикует.
-3. **`.env`.** Дозаполните то, чего не было для локальной разработки:
+1. **DNS.** A-запись `vancodex.tech` должна уже указывать на IP этого сервера — вы говорите, что это уже сделано, но на всякий случай проверить: `dig +short vancodex.tech` должен вернуть IP именно этого сервера.
+2. **Firewall / security group.** На сервере должны быть открыты порты **80** и **443** для входящих подключений из интернета (80 нужен для ACME HTTP-01 challenge при получении сертификата, 443 — сам HTTPS). Порты 5432/6379/3000 наоборот — наружу открывать не нужно, `docker-compose.prod.yml` их и не публикует.
+3. **`.env`.** Скопируйте `.env.example` в `.env` и заполните: секреты (`JWT_*_SECRET`, `TELEGRAM_WEBHOOK_SECRET`, пароль Postgres), `TELEGRAM_BOT_TOKEN`/`TELEGRAM_BOT_USERNAME`, `CERTBOT_EMAIL` (ваша почта — Let's Encrypt пришлёт туда, если с сертификатом что-то не так), а также:
    ```bash
    NODE_ENV=production
-   DOMAIN=your-domain.com
-   ACME_EMAIL=you@example.com          # необязательно, но рекомендуется
-   FRONTEND_URL=https://your-frontend-domain.com
-   CORS_ORIGINS=https://your-frontend-domain.com
+   FRONTEND_URL=https://vancodex.tech          # или адрес фронтенда, если он отдельно
+   CORS_ORIGINS=https://vancodex.tech           # без "*"
    ```
-   `NODE_ENV=production` — обязательно, иначе cookie с токенами не получат флаг `Secure` (см. раздел «Безопасность»).
+   `NODE_ENV=production` — обязательно, иначе cookie с токенами не получат флаг `Secure`.
 
-**Запуск:**
+**Запуск — вот та самая одна команда:**
 
 ```bash
 docker-compose -f docker-compose.prod.yml up --build -d
 ```
 
+Она поднимет Postgres и Redis, дождётся их healthcheck, соберёт и запустит `app` (миграции накатятся сами через entrypoint), поднимет `nginx`, который автоматически получит сертификат Let's Encrypt для `vancodex.tech` и начнёт проксировать `https://vancodex.tech` → `app:3000`. Обычно это занимает 30-60 секунд с момента старта до рабочего HTTPS.
+
 **Проверка, что HTTPS поднялся:**
 
 ```bash
-curl -i https://your-domain.com/auth/telegram/login/start -X POST
+curl -i https://vancodex.tech/auth/telegram/login/start -X POST
 ```
 
-Если вместо ответа — таймаут или ошибка сертификата: почти всегда это Caddy ещё не смог получить сертификат (DNS не успел прописаться, порт 80 закрыт файрволом, или домен уже занят под HTTPS у другого провайдера). Смотрите его логи:
+Если вместо ответа — таймаут или ошибка сертификата: почти всегда это nginx ещё не успел получить сертификат (DNS ещё не разошёлся, порт 80 закрыт файрволом) — подождите ещё немного и проверьте логи:
 
 ```bash
-docker-compose -f docker-compose.prod.yml logs -f caddy
+docker-compose -f docker-compose.prod.yml logs -f nginx
 ```
 
-**Дальше — регистрация вебхука** (тот же шаг, что в разделе 3.2, но теперь адрес уже настоящий, а не туннель):
+**Дальше — регистрация вебхука** (тот же шаг, что в разделе 3.2, но теперь адрес уже настоящий):
 
 ```bash
 curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://your-domain.com/telegram/webhook",
+    "url": "https://vancodex.tech/telegram/webhook",
     "secret_token": "<значение TELEGRAM_WEBHOOK_SECRET из .env>",
     "allowed_updates": ["message"]
   }'
@@ -265,9 +267,11 @@ curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
 curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
 ```
 
-**Финальная сквозная проверка всего флоу** — откройте `https://t.me/{TELEGRAM_BOT_USERNAME}?start=test` в браузере (или сгенерируйте настоящий код через `POST https://your-domain.com/auth/telegram/login/start`), нажмите Start — бот должен прислать сообщение с кнопкой «Подтвердить вход» в течение секунды-двух. Если бот молчит — проверьте логи приложения (`docker-compose -f docker-compose.prod.yml logs -f app`): скорее всего, `TELEGRAM_BOT_TOKEN` неверен, либо вебхук зарегистрирован на другой адрес.
+**Финальная сквозная проверка всего флоу** — сгенерируйте код `POST https://vancodex.tech/auth/telegram/login/start`, откройте вернувшуюся `telegramDeepLink`, нажмите Start — бот должен прислать сообщение с кнопкой «Подтвердить вход» в течение секунды-двух. Если бот молчит — проверьте логи приложения (`docker-compose -f docker-compose.prod.yml logs -f app`): скорее всего, `TELEGRAM_BOT_TOKEN` неверен, либо вебхук зарегистрирован на другой адрес.
 
-Если позже понадобится накатить новую версию кода — `git pull && docker-compose -f docker-compose.prod.yml up --build -d` пересоберёт и перезапустит только то, что изменилось; `postgres`/`redis` данные не теряются (именованные volume).
+Если позже понадобится накатить новую версию кода — `git pull && docker-compose -f docker-compose.prod.yml up --build -d` пересоберёт и перезапустит только то, что изменилось; `postgres`/`redis`/сертификат не теряются (именованные volume, включая `nginx_secrets` с сертификатом).
+
+> Образ `nginx` закреплён на теге `:latest` сознательно — так `docker pull` гарантированно не упадёт на несуществующем теге при первом запуске. Когда всё заработает, для стабильности стоит зафиксировать версию — актуальный список на [Docker Hub](https://hub.docker.com/r/jonasal/nginx-certbot/tags).
 
 ---
 
@@ -832,13 +836,13 @@ export function TelegramLoginButton() {
 
 ### 7.11. Чеклист перед продакшеном
 
-- [ ] **HTTPS обязателен.** И Telegram Bot API (`setWebhook` принимает только `https://`-адреса), и `Secure`-cookie требуют валидный HTTPS-сертификат на публичном адресе. См. раздел 3.5 (`docker-compose.prod.yml` + Caddy).
+- [ ] **HTTPS обязателен.** И Telegram Bot API (`setWebhook` принимает только `https://`-адреса), и `Secure`-cookie требуют валидный HTTPS-сертификат на публичном адресе. См. раздел 3.5 (`docker-compose.prod.yml` + nginx).
 - [ ] `NODE_ENV=production` — включает `Secure` у cookie (в `docker-compose.prod.yml` уже прописано принудительно).
 - [ ] Все секреты (`JWT_*_SECRET`, `TELEGRAM_WEBHOOK_SECRET`, пароль Postgres) — сгенерированы заново для продакшена, не те же значения, что в dev/`*.example`.
 - [ ] Раздельные `.env` для dev/staging/production, продакшен-файл не коммитится и не логируется целиком нигде (CI-переменные — через секрет-хранилище платформы, а не файл в репозитории).
 - [ ] Регулярная ротация секретов (особенно `TELEGRAM_WEBHOOK_SECRET` и JWT-секретов) по внутреннему регламенту; при ротации JWT-секретов все текущие сессии инвалидируются одномоментно — планировать на окно с уведомлением пользователей.
 - [ ] Бэкапы БД (Postgres) — регулярные, с проверкой восстановления, отдельно от бэкапов Redis (Redis тут — только эфемерные коды и rate-limit счётчики, его состояние не критично терять).
-- [ ] Порты Postgres/Redis/приложения не должны быть доступны из интернета — при развёртывании через `docker-compose.prod.yml` (см. 3.5) они и так не публикуются наружу, единственная публичная точка входа — Caddy на 80/443. Если разворачиваете иначе (без Caddy, свой reverse-proxy) — проследите за этим сами: либо убрать `ports:` у `postgres`/`redis`/`app`, либо забиндить на `127.0.0.1`.
+- [ ] Порты Postgres/Redis/приложения не должны быть доступны из интернета — при развёртывании через `docker-compose.prod.yml` (см. 3.5) они и так не публикуются наружу, единственная публичная точка входа — nginx на 80/443. Если разворачиваете иначе (свой reverse-proxy) — проследите за этим сами: либо убрать `ports:` у `postgres`/`redis`/`app`, либо забиндить на `127.0.0.1`.
 - [ ] `CORS_ORIGINS` — точный список продакшен-доменов фронтенда, без `*`.
 - [ ] Throttler переведён на Redis-backed storage при более чем одной реплике `app` (см. 7.2 и Roadmap).
 

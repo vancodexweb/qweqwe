@@ -1,20 +1,16 @@
-# Production-конфигурация: то же самое, что docker-compose.yml, плюс Caddy
-# в качестве reverse-proxy с автоматическим HTTPS (Let's Encrypt) — он и есть
-# единственная публичная точка входа (порты 80/443). Порт приложения (3000) и
-# порты Postgres/Redis (5432/6379) наружу НЕ публикуются — только внутри
-# docker-сети, куда извне доступа нет.
+# Production-конфигурация для домена vancodex.tech: то же самое, что
+# docker-compose.yml (postgres + redis + app), плюс nginx с автоматическим
+# HTTPS (образ jonasal/nginx-certbot сам получает и продлевает сертификат
+# Let's Encrypt — никаких ручных вызовов certbot).
 #
-# Перед первым запуском:
-#   1. DNS домена (DOMAIN в .env) должен уже указывать на IP этого сервера.
-#   2. На сервере должны быть открыты порты 80 и 443 (например, в security group
-#      облачного провайдера) — 80 нужен Caddy для ACME HTTP-01 challenge.
-#
-# Запуск:
+# ВСЁ поднимается одной командой:
 #   docker-compose -f docker-compose.prod.yml up --build -d
 #
-# Это отдельный, самостоятельный compose-файл (не overlay поверх
-# docker-compose.yml) — так проще: никакой путаницы с тем, как Docker Compose
-# объединяет списки (ports/volumes) между несколькими -f файлами.
+# Единственное условие снаружи Docker: DNS-запись vancodex.tech должна уже
+# указывать на IP этого сервера, и на сервере должны быть открыты порты 80/443.
+#
+# Порты Postgres/Redis/приложения наружу НЕ публикуются — единственная
+# публичная точка входа — nginx на 80/443.
 
 services:
   postgres:
@@ -60,24 +56,24 @@ services:
       redis:
         condition: service_healthy
 
-  caddy:
-    image: caddy:2-alpine
+  nginx:
+    # :latest — сознательный выбор ради надёжности первого запуска (гарантированно
+    # существующий тег). Когда всё заработает, для стабильности стоит зафиксировать
+    # конкретную версию — актуальный список тегов: https://hub.docker.com/r/jonasal/nginx-certbot/tags
+    image: jonasal/nginx-certbot:latest
     restart: unless-stopped
+    environment:
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL:-}
     ports:
       - '80:80'
       - '443:443'
-    environment:
-      DOMAIN: ${DOMAIN}
-      ACME_EMAIL: ${ACME_EMAIL:-}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - nginx_secrets:/etc/letsencrypt
+      - ./nginx/user_conf.d:/etc/nginx/user_conf.d:ro
     depends_on:
       - app
 
 volumes:
   postgres_data:
   redis_data:
-  caddy_data:
-  caddy_config:
+  nginx_secrets:
