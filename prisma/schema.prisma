@@ -1,0 +1,94 @@
+// Prisma-схема модуля авторизации.
+// Подробное описание сущностей и связей — в README.md, раздел "Архитектура".
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Пользователь.
+/// Может существовать в трёх состояниях:
+///  1) только Telegram (nickname = null, passwordHash = null, isTelegramLinked = true)
+///  2) только nickname/password (telegramId = null, isTelegramLinked = false)
+///  3) оба способа входа привязаны (после /auth/telegram/link/start + confirm)
+model User {
+  id       String  @id @default(uuid())
+
+  /// Никнейм для входа по паролю. Уникален, но необязателен —
+  /// у чисто Telegram-аккаунтов остаётся null до тех пор, пока пользователь
+  /// сам не задаст никнейм/пароль (в текущей версии — вне скоупа, см. Roadmap).
+  nickname String? @unique @db.VarChar(32)
+
+  /// Хэш пароля (argon2id). Никогда не выбирается в API-ответах.
+  passwordHash String?
+
+  /// Telegram ID пользователя. BigInt, т.к. Telegram user id может превышать 2^31.
+  /// Проставляется ТОЛЬКО через подтверждённый Redis-код (см. TelegramAuthService),
+  /// никогда напрямую из тела запроса клиента.
+  telegramId       BigInt?  @unique
+  telegramUsername String?  @db.VarChar(64)
+
+  /// Признак привязки Telegram. Обязательное условие для финансовых операций
+  /// (см. TelegramLinkedGuard). Никогда не принимается как поле DTO от клиента.
+  isTelegramLinked Boolean @default(false)
+
+  /// Баланс пользователя. Decimal, чтобы избежать ошибок округления денежных сумм.
+  balance Decimal @default(0) @db.Decimal(18, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  refreshTokens RefreshToken[]
+  auditLogs     AuditLog[]
+
+  @@map("users")
+}
+
+/// Refresh-токены выдаются парами с access-токеном и хранятся в виде хэша (не в открытом виде),
+/// чтобы утечка БД не давала возможности угнать сессию. Поддерживают ротацию и отзыв.
+model RefreshToken {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 хэш от самого refresh-токена (сырое значение никогда не сохраняется).
+  tokenHash String @unique
+
+  revoked   Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  /// Метаданные для аудита и отладки скомпрометированных сессий.
+  ip        String?
+  userAgent String?
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+/// Журнал действий пользователей и системы для расследования инцидентов
+/// (брутфорс, повторное использование Telegram-кодов и т.д.). Пароли/токены сюда не пишутся.
+model AuditLog {
+  id     String  @id @default(uuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  action    String
+  ip        String?
+  userAgent String?
+
+  /// Дополнительный контекст события (например, nickname при неудачном логине
+  /// под несуществующим пользователем — сам userId в этом случае недоступен).
+  metadata Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

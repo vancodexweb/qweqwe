@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-auth_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-auth_app_password}
+      POSTGRES_DB: ${POSTGRES_DB:-auth_app}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Проброшено на хост для локальной отладки (GUI-клиенты и т.п.).
+      # В production рекомендуется убрать (см. README, "Чеклист перед продакшеном").
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-auth_app} -d ${POSTGRES_DB:-auth_app}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Внутри docker-сети сервисы адресуются по имени сервиса, а не localhost —
+      # эти два значения намеренно переопределяют то, что может быть в .env
+      # (там DATABASE_URL/REDIS_URL актуальны для запуска НЕ через Docker).
+      DATABASE_URL: postgresql://${POSTGRES_USER:-auth_app}:${POSTGRES_PASSWORD:-auth_app_password}@postgres:5432/${POSTGRES_DB:-auth_app}?schema=public
+      REDIS_URL: redis://redis:6379
+    ports:
+      - '${PORT:-3000}:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:

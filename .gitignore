@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
+.env
+.env.*.local
+.env.local
+
+# Prisma
+prisma/generated/
+
+# Logs
+npm-debug.log*
+*.log
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Docker volumes (локальные, если монтируются в проект)
+postgres-data/
+redis-data/
