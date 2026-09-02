@@ -50,6 +50,13 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-auth_app}:${POSTGRES_PASSWORD:-auth_app_password}@postgres:5432/${POSTGRES_DB:-auth_app}?schema=public
       REDIS_URL: redis://redis:6379
       NODE_ENV: production
+    # Явные DNS-серверы: на хостах с systemd-resolved (127.0.0.53 в
+    # /etc/resolv.conf хоста) Docker иногда не успевает корректно подставить
+    # публичный DNS для контейнеров, и любые внешние запросы (в т.ч. к Telegram
+    # Bot API) падают с "Temporary failure in name resolution".
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
       postgres:
         condition: service_healthy
@@ -64,6 +71,12 @@ services:
     restart: unless-stopped
     environment:
       CERTBOT_EMAIL: ${CERTBOT_EMAIL:-}
+    # См. комментарий про DNS у сервиса app выше — certbot внутри этого
+    # контейнера обращается к acme-v02.api.letsencrypt.org и без этого
+    # падает с той же "Temporary failure in name resolution".
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     ports:
       - '80:80'
       - '443:443'
