@@ -1,0 +1,83 @@
+# Production-конфигурация: то же самое, что docker-compose.yml, плюс Caddy
+# в качестве reverse-proxy с автоматическим HTTPS (Let's Encrypt) — он и есть
+# единственная публичная точка входа (порты 80/443). Порт приложения (3000) и
+# порты Postgres/Redis (5432/6379) наружу НЕ публикуются — только внутри
+# docker-сети, куда извне доступа нет.
+#
+# Перед первым запуском:
+#   1. DNS домена (DOMAIN в .env) должен уже указывать на IP этого сервера.
+#   2. На сервере должны быть открыты порты 80 и 443 (например, в security group
+#      облачного провайдера) — 80 нужен Caddy для ACME HTTP-01 challenge.
+#
+# Запуск:
+#   docker-compose -f docker-compose.prod.yml up --build -d
+#
+# Это отдельный, самостоятельный compose-файл (не overlay поверх
+# docker-compose.yml) — так проще: никакой путаницы с тем, как Docker Compose
+# объединяет списки (ports/volumes) между несколькими -f файлами.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-auth_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-auth_app_password}
+      POSTGRES_DB: ${POSTGRES_DB:-auth_app}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-auth_app} -d ${POSTGRES_DB:-auth_app}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-auth_app}:${POSTGRES_PASSWORD:-auth_app_password}@postgres:5432/${POSTGRES_DB:-auth_app}?schema=public
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
